@@ -9,7 +9,12 @@ jobs:
     steps:
       - uses: actions/checkout@v2
         with:
-          ref: ${{ inputs.release_tag }}
+          ref: ${{ github.ref_name }}
+
+      - name: Set release version
+        run: |
+          RELEASE_VERSION=${GITHUB_REF_NAME#release/}
+          echo "RELEASE_VERSION=$RELEASE_VERSION" >> $GITHUB_ENV
 
       - name: Install dependencies
         run: |
@@ -20,6 +25,14 @@ jobs:
           npm run lint
           npm run compile
 
+      - name: Create tarball
+        run: |
+          mkdir archive
+          tar -czf ./archive/vscode-eslint-${{ env.RELEASE_VERSION }}.tar.gz --exclude="archive" --exclude=".git" --exclude=".github" --exclude="**/node_modules" .
+
       - name: Release
         uses: softprops/action-gh-release@v2
+        with:
+          files: archive/vscode-eslint-${{ env.RELEASE_VERSION }}.tar.gz
+          tag_name: ${{ env.RELEASE_VERSION }}
         if: startsWith(github.ref, 'refs/tags/')

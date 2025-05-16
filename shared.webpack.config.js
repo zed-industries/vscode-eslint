@@ -21,7 +21,7 @@ module.exports = function withDefaults(/**@type WebpackConfig*/extConfig) {
 			__dirname: false // leave the __dirname-behaviour intact
 		},
 		resolve: {
-			conditionNames: ['import', 'require'],
+			conditionNames: ['import', 'require', 'node'],
 			mainFields: ['module', 'main'],
 			extensions: ['.ts', '.js'] // support ts-files and js-files
 		},

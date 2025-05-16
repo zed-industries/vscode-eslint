@@ -2,7 +2,6 @@
  * Copyright (c) Microsoft Corporation. All rights reserved.
  * Licensed under the MIT License. See License.txt in the project root for license information.
  * ------------------------------------------------------------------------------------------ */
-
 import * as fs from 'fs';
 import * as path from 'path';
 import * as crypto from 'crypto';
@@ -19,7 +18,7 @@ import {
 import { URI } from 'vscode-uri';
 
 import { ProbeFailedParams, ProbeFailedRequest, NoESLintLibraryRequest, Status, NoConfigRequest, StatusNotification } from './shared/customMessages';
-import { ConfigurationSettings, DirectoryItem, ESLintSeverity, ModeEnum, ModeItem, PackageManagers, RuleCustomization, RuleSeverity, Validate } from './shared/settings';
+import { ConfigurationSettings, DirectoryItem, ESLintOptions, ESLintSeverity, ModeEnum, ModeItem, PackageManagers, RuleCustomization, RuleSeverity, Validate } from './shared/settings';
 
 import * as Is from './is';
 import { LRUCache } from './linkedMap';
@@ -406,7 +405,7 @@ export class Fixes {
 		if (this.isEmpty()) {
 			throw new Error('No edits recorded.');
 		}
-		return this.edits.values().next().value.documentVersion;
+		return this.edits.values().next().value!.documentVersion;
 	}
 
 	public getScoped(diagnostics: Diagnostic[]): Problem[] {
@@ -472,7 +471,7 @@ export class Fixes {
 	}
 }
 
-export type SaveRuleConfigItem = { offRules: Set<string>; onRules: Set<string>};
+export type SaveRuleConfigItem = { offRules: Set<string>; onRules: Set<string>; options: ESLintOptions | undefined};
 
 /**
  * Manages the special save rule configurations done in the VS Code settings.
@@ -492,8 +491,9 @@ export namespace SaveRuleConfigs {
 			return result;
 		}
 		const rules = settings.codeActionOnSave.rules;
+		const options = settings.codeActionOnSave.options;
 		result = await ESLint.withClass(async (eslint) => {
-			if (rules === undefined || eslint.isCLIEngine) {
+			if ((rules === undefined && options === undefined) || eslint.isCLIEngine) {
 				return undefined;
 			}
 			const config = await eslint.calculateConfigForFile(filePath);
@@ -502,18 +502,20 @@ export namespace SaveRuleConfigs {
 			}
 			const offRules: Set<string> = new Set();
 			const onRules: Set<string> = new Set();
-			if (rules.length === 0) {
-				Object.keys(config.rules).forEach(ruleId => offRules.add(ruleId));
-			} else {
-				for (const ruleId of Object.keys(config.rules)) {
-					if (isOff(ruleId, rules)) {
-						offRules.add(ruleId);
-					} else {
-						onRules.add(ruleId);
+			if (rules !== undefined) {
+				if (rules.length === 0) {
+					Object.keys(config.rules).forEach(ruleId => offRules.add(ruleId));
+				} else {
+					for (const ruleId of Object.keys(config.rules)) {
+						if (isOff(ruleId, rules)) {
+							offRules.add(ruleId);
+						} else {
+							onRules.add(ruleId);
+						}
 					}
 				}
 			}
-			return offRules.size > 0 ? { offRules, onRules } : undefined;
+			return (offRules.size > 0 || options) ? { offRules, onRules, options } : undefined;
 		}, settings);
 		if (result === undefined || result === null) {
 			saveRuleConfigCache.set(uri, null);
@@ -550,7 +552,7 @@ export namespace RuleSeverities {
 
 	const ruleSeverityCache = new LRUCache<string, RuleSeverity | null>(1024);
 
-	export function getOverride(ruleId: string, customizations: RuleCustomization[]): RuleSeverity | undefined {
+	export function getOverride(ruleId: string, customizations: RuleCustomization[], isFixable?: boolean): RuleSeverity | undefined {
 		let result: RuleSeverity | undefined | null = ruleSeverityCache.get(ruleId);
 		if (result === null) {
 			return undefined;
@@ -559,7 +561,12 @@ export namespace RuleSeverities {
 			return result;
 		}
 		for (const customization of customizations) {
-			if (asteriskMatches(customization.rule, ruleId)) {
+			if (
+				// Rule name should match
+				asteriskMatches(customization.rule, ruleId) &&
+				// Fixable flag should match the fixability of the rule if it's defined
+				(customization.fixable === undefined || customization.fixable === isFixable)
+			) {
 				result = customization.severity;
 			}
 		}
@@ -620,7 +627,8 @@ namespace Diagnostics {
 			endLine = startLine;
 			endChar = startLineText.length;
 		}
-		const override = RuleSeverities.getOverride(problem.ruleId, settings.rulesCustomizations);
+
+		const override = RuleSeverities.getOverride(problem.ruleId, settings.rulesCustomizations, problem.fix !== undefined);
 		const result: Diagnostic = {
 			message: message,
 			severity: convertSeverityToDiagnosticWithOverride(problem.severity, override),
@@ -774,6 +782,7 @@ export namespace ESLint {
 
 	const languageId2PluginName: Map<string, string> = new Map([
 		['astro', 'astro'],
+		['civet', 'civet'],
 		['html', 'html'],
 		['json', 'jsonc'],
 		['json5', 'jsonc'],
@@ -790,15 +799,21 @@ export namespace ESLint {
 	const projectFolderIndicators: {
 		fileName: string;
 		isRoot: boolean;
+		isFlatConfig: boolean;
 	}[] = [
-		{ fileName: 'package.json', isRoot: true },
-		{ fileName: '.eslintignore', isRoot: true },
-		{ fileName: 'eslint.config.js', isRoot: true },
-		{ fileName: '.eslintrc', isRoot: false },
-		{ fileName: '.eslintrc.json', isRoot: false },
-		{ fileName: '.eslintrc.js', isRoot: false },
-		{ fileName: '.eslintrc.yaml', isRoot: false },
-		{ fileName: '.eslintrc.yml', isRoot: false },
+		{ fileName: 'eslint.config.js', isRoot: true, isFlatConfig: true },
+		{ fileName: 'eslint.config.cjs', isRoot: true, isFlatConfig: true },
+		{ fileName: 'eslint.config.mjs', isRoot: true, isFlatConfig: true },
+		{ fileName: 'eslint.config.ts', isRoot: true, isFlatConfig: true },
+		{ fileName: 'eslint.config.cts', isRoot: true, isFlatConfig: true },
+		{ fileName: 'eslint.config.mts', isRoot: true, isFlatConfig: true },
+		{ fileName: 'package.json', isRoot: true, isFlatConfig: false },
+		{ fileName: '.eslintignore', isRoot: true, isFlatConfig: false },
+		{ fileName: '.eslintrc', isRoot: false, isFlatConfig: false },
+		{ fileName: '.eslintrc.json', isRoot: false, isFlatConfig: false },
+		{ fileName: '.eslintrc.js', isRoot: false, isFlatConfig: false },
+		{ fileName: '.eslintrc.yaml', isRoot: false, isFlatConfig: false },
+		{ fileName: '.eslintrc.yml', isRoot: false, isFlatConfig: false }
 	];
 
 	const path2Library: Map<string, ESLintModule> = new Map<string, ESLintModule>();
@@ -854,19 +869,26 @@ export namespace ESLint {
 			settings.resolvedGlobalPackageManagerPath = GlobalPaths.get(settings.packageManager);
 			const filePath = inferFilePath(document);
 			const workspaceFolderPath = settings.workspaceFolder !== undefined ? inferFilePath(settings.workspaceFolder.uri) : undefined;
+			let assumeFlatConfig:boolean = false;
 			const hasUserDefinedWorkingDirectories: boolean = configuration.workingDirectory !== undefined;
 			const workingDirectoryConfig = configuration.workingDirectory ?? { mode: ModeEnum.location };
 			if (ModeItem.is(workingDirectoryConfig)) {
 				let candidate: string | undefined;
 				if (workingDirectoryConfig.mode === ModeEnum.location) {
 					if (workspaceFolderPath !== undefined) {
-						candidate = workspaceFolderPath;
+						const [configLocation, isFlatConfig] = findWorkingDirectory(workspaceFolderPath, filePath);
+						if (isFlatConfig && settings.useFlatConfig !== false) {
+							candidate = configLocation;
+							assumeFlatConfig = true;
+						} else {
+							candidate = workspaceFolderPath;
+						}
 					} else if (filePath !== undefined && !isUNC(filePath)) {
 						candidate = path.dirname(filePath);
 					}
 				} else if (workingDirectoryConfig.mode === ModeEnum.auto) {
 					if (workspaceFolderPath !== undefined) {
-						candidate = findWorkingDirectory(workspaceFolderPath, filePath);
+						candidate = findWorkingDirectory(workspaceFolderPath, filePath)[0];
 					} else if (filePath !== undefined && !isUNC(filePath)) {
 						candidate = path.dirname(filePath);
 					}
@@ -896,7 +918,7 @@ export namespace ESLint {
 			// During Flat Config is considered experimental,
 			// we need to import FlatESLint from 'eslint/use-at-your-own-risk'.
 			// See: https://eslint.org/blog/2022/08/new-config-system-part-3/
-			const eslintPath = settings.experimental.useFlatConfig ? 'eslint/use-at-your-own-risk' : 'eslint';
+			const eslintPath = settings.experimental?.useFlatConfig ? 'eslint/use-at-your-own-risk' : 'eslint';
 			if (nodePath !== undefined) {
 				promise = Files.resolve(eslintPath, nodePath, nodePath, trace).then<string, string>(undefined, () => {
 					return Files.resolve(eslintPath, settings.resolvedGlobalPackageManagerPath, moduleResolveWorkingDirectory, trace);
@@ -909,7 +931,7 @@ export namespace ESLint {
 			return promise.then(async (libraryPath) => {
 				let library = path2Library.get(libraryPath);
 				if (library === undefined) {
-					if (settings.experimental.useFlatConfig) {
+					if (settings.experimental?.useFlatConfig === true) {
 						const lib = loadNodeModule<{ FlatESLint?: ESLintClassConstructor }>(libraryPath);
 						if (lib === undefined) {
 							settings.validate = Validate.off;
@@ -949,9 +971,9 @@ export namespace ESLint {
 					if (library !== undefined && ESLintModule.hasESLintClass(library) && typeof library.ESLint.version === 'string') {
 						const esLintVersion = semverParse(library.ESLint.version);
 						if (esLintVersion !== null) {
-							if (semverGte(esLintVersion, '8.57.0') && settings.experimental.useFlatConfig === true) {
+							if (semverGte(esLintVersion, '8.57.0') && settings.experimental?.useFlatConfig === true) {
 								connection.console.info(`ESLint version ${library.ESLint.version} supports flat config without experimental opt-in. The 'eslint.experimental.useFlatConfig' setting can be removed.`);
-							} else if (semverGte(esLintVersion, '10.0.0') && (settings.experimental.useFlatConfig === false || settings.useFlatConfig === false)) {
+							} else if (semverGte(esLintVersion, '10.0.0') && (settings.experimental?.useFlatConfig === false || settings.useFlatConfig === false)) {
 								connection.console.info(`ESLint version ${library.ESLint.version} only supports flat configs. Setting is ignored.`);
 							}
 						}
@@ -967,11 +989,20 @@ export namespace ESLint {
 						const pluginName = languageId2PluginName.get(document.languageId);
 						const parserOptions = languageId2ParserOptions.get(document.languageId);
 						if (defaultLanguageIds.has(document.languageId)) {
-							const isIgnored = await ESLint.withClass(async (eslintClass) => {
-								return eslintClass.isPathIgnored(filePath);
-							}, settings);
-							if (!isIgnored) {
-								settings.validate = Validate.on;
+							try {
+								const [isIgnored, configType] = await ESLint.withClass(async (eslintClass) => {
+									return [await eslintClass.isPathIgnored(filePath), ESLintClass.getConfigType(eslintClass)];
+								}, settings);
+								if (isIgnored === false || (isIgnored === true && settings.onIgnoredFiles !== ESLintSeverity.off)) {
+									settings.validate = Validate.on;
+									if (assumeFlatConfig && configType === 'eslintrc') {
+										connection.console.info(`Expected to use flat configuration from directory ${settings.workingDirectory?.directory} but loaded eslintrc config.`);
+									}
+								}
+							} catch (error: any) {
+								settings.validate = Validate.off;
+								await connection.sendNotification(StatusNotification.type, { uri, state: Status.error });
+								connection.console.error(`Calculating config file for ${uri}) failed.\n${error instanceof Error ? error.stack : ''}`);
 							}
 						} else if (parserRegExps !== undefined || pluginName !== undefined || parserOptions !== undefined) {
 							const [eslintConfig, configType] = await ESLint.withClass(async (eslintClass) => {
@@ -983,8 +1014,8 @@ export namespace ESLint {
 									}
 								} catch (err) {
 									try {
-										void connection.sendNotification(StatusNotification.type, { uri, state: Status.error });
-										void connection.console.error(`Calculating config file for ${uri}) failed.\n${err instanceof Error ? err.stack : ''}`);
+										await connection.sendNotification(StatusNotification.type, { uri, state: Status.error });
+										connection.console.error(`Calculating config file for ${uri}) failed.\n${err instanceof Error ? err.stack : ''}`);
 									} catch {
 										// little we can do here
 									}
@@ -992,6 +1023,9 @@ export namespace ESLint {
 								}
 							}, settings);
 							if (eslintConfig !== undefined) {
+								if (assumeFlatConfig && configType === 'eslintrc') {
+									connection.console.info(`Expected to use flat configuration from directory ${settings.workingDirectory?.directory} but loaded eslintrc config.`);
+								}
 								if (configType === 'flat' || ESLintModule.isFlatConfig(settings.library)) {
 									// We have a flat configuration. This means that the config file needs to
 									// have a section per file extension we want to validate. If there is none than
@@ -1253,21 +1287,23 @@ export namespace ESLint {
 		}
 	}
 
-	export function findWorkingDirectory(workspaceFolder: string, file: string | undefined): string | undefined {
+	export function findWorkingDirectory(workspaceFolder: string, file: string | undefined): [string, boolean] {
 		if (file === undefined || isUNC(file)) {
-			return workspaceFolder;
+			return [workspaceFolder, false];
 		}
 		// Don't probe for something in node modules folder.
 		if (file.indexOf(`${path.sep}node_modules${path.sep}`) !== -1) {
-			return workspaceFolder;
+			return [workspaceFolder, false];
 		}
 
 		let result: string = workspaceFolder;
+		let flatConfig: boolean = false;
 		let directory: string | undefined = path.dirname(file);
 		outer: while (directory !== undefined && directory.startsWith(workspaceFolder)) {
-			for (const { fileName, isRoot } of projectFolderIndicators) {
+			for (const { fileName, isRoot, isFlatConfig } of projectFolderIndicators) {
 				if (fs.existsSync(path.join(directory, fileName))) {
 					result = directory;
+					flatConfig = isFlatConfig;
 					if (isRoot) {
 						break outer;
 					} else {
@@ -1278,7 +1314,7 @@ export namespace ESLint {
 			const parent = path.dirname(directory);
 			directory = parent !== directory ? parent : undefined;
 		}
-		return result;
+		return [result, flatConfig];
 	}
 
 	export namespace ErrorHandlers {

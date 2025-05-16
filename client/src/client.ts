@@ -13,14 +13,14 @@ import {
 } from 'vscode';
 
 import {
-	LanguageClient, LanguageClientOptions, TransportKind, ErrorHandler, CloseAction, RevealOutputChannelOn, ServerOptions, DocumentFilter,
+	LanguageClient, LanguageClientOptions, TransportKind, ErrorHandler, CloseAction, RevealOutputChannelOn, ServerOptions,
 	DidCloseTextDocumentNotification, DidOpenTextDocumentNotification, State, VersionedTextDocumentIdentifier, ExecuteCommandParams,
 	ExecuteCommandRequest, ConfigurationParams, NotebookDocumentSyncRegistrationType, DiagnosticPullMode, DocumentDiagnosticRequest
 } from 'vscode-languageclient/node';
 
 import { LegacyDirectoryItem, Migration, PatternItem, ValidateItem } from './settings';
 import { ExitCalled, NoConfigRequest, NoESLintLibraryRequest, OpenESLintDocRequest, ProbeFailedRequest, ShowOutputChannel, Status, StatusNotification, StatusParams } from './shared/customMessages';
-import { CodeActionSettings, CodeActionsOnSaveMode, CodeActionsOnSaveRules, ConfigurationSettings, DirectoryItem, ESLintOptions, ESLintSeverity, ModeItem, PackageManagers, RuleCustomization, RunValues, Validate } from './shared/settings';
+import { CodeActionSettings, CodeActionsOnSaveMode, CodeActionsOnSaveOptions, CodeActionsOnSaveRules, ConfigurationSettings, DirectoryItem, ESLintOptions, ESLintSeverity, ModeItem, PackageManagers, RuleCustomization, RunValues, Validate } from './shared/settings';
 import { convert2RegExp, Is, Semaphore, toOSPath, toPosixPath } from './node-utils';
 import { pickFolder } from './vscode-utils';
 
@@ -48,7 +48,7 @@ export class Validator {
 		}
 
 		const languageId = textDocument.languageId;
-		const validate = config.get<(ValidateItem | string)[]>('validate');
+		const validate = config.get<((ValidateItem | string)[]) | null>('validate', null);
 		if (Array.isArray(validate)) {
 			for (const item of validate) {
 				if (Is.string(item) && item === languageId) {
@@ -57,6 +57,7 @@ export class Validator {
 					return Validate.on;
 				}
 			}
+			return Validate.off;
 		}
 
 		if (this.probeFailed.has(textDocument.uri.toString())) {
@@ -136,8 +137,8 @@ export namespace ESLintClient {
 	export function create(context: ExtensionContext, validator: Validator): [LanguageClient, () => void] {
 
 		// Filters for client options
-		const packageJsonFilter: DocumentFilter = { scheme: 'file', pattern: '**/package.json' };
-		const configFileFilter: DocumentFilter = { scheme: 'file', pattern: '**/{.eslintr{c.js,c.yaml,c.yml,c,c.json},eslint.config.js}' };
+		const packageJsonFilter: VDocumentFilter = { scheme: 'file', pattern: '**/package.json' };
+		const configFileFilter: VDocumentFilter = { scheme: 'file', pattern: '**/{.eslintr{c.js,c.yaml,c.yml,c,c.json},eslint.confi{g.js,g.mjs,g.cjs}}' };
 		const supportedQuickFixKinds: Set<string> = new Set([CodeActionKind.Source.value, CodeActionKind.SourceFixAll.value, `${CodeActionKind.SourceFixAll.value}.eslint`, CodeActionKind.QuickFix.value]);
 
 		// A map of documents synced to the server
@@ -249,7 +250,6 @@ export namespace ESLintClient {
 				pnpm: 'pnpm install -g eslint',
 				yarn: 'yarn global add eslint'
 			};
-			const isPackageManagerNpm = packageManager === 'npm';
 			interface ButtonItem extends MessageItem {
 				id: number;
 			}
@@ -265,7 +265,6 @@ export namespace ESLintClient {
 					`To use ESLint please install eslint by running ${localInstall[packageManager]} in the workspace folder ${workspaceFolder.name}`,
 					`or globally using '${globalInstall[packageManager]}'. You need to reopen the workspace after installing eslint.`,
 					'',
-					isPackageManagerNpm ? 'If you are using yarn or pnpm instead of npm set the setting `eslint.packageManager` to either `yarn` or `pnpm`' : null,
 					`Alternatively you can disable ESLint for the workspace folder ${workspaceFolder.name} by executing the 'Disable ESLint' command.`
 				].filter((str => (str !== null))).join('\n'));
 
@@ -285,7 +284,6 @@ export namespace ESLintClient {
 				client.info([
 					`Failed to load the ESLint library for the document ${uri.fsPath}`,
 					`To use ESLint for single JavaScript file install eslint globally using '${globalInstall[packageManager]}'.`,
-					isPackageManagerNpm ? 'If you are using yarn or pnpm instead of npm set the setting `eslint.packageManager` to either `yarn` or `pnpm`' : null,
 					'You need to reopen VS Code after installing eslint.',
 				].filter((str => (str !== null))).join('\n'));
 
@@ -715,6 +713,7 @@ export namespace ESLintClient {
 					settings.format = !!config.get<boolean>('format.enable', false);
 					settings.codeActionOnSave.mode = CodeActionsOnSaveMode.from(config.get<CodeActionsOnSaveMode>('codeActionsOnSave.mode', CodeActionsOnSaveMode.all));
 					settings.codeActionOnSave.rules = CodeActionsOnSaveRules.from(config.get<string[] | null>('codeActionsOnSave.rules', null));
+					settings.codeActionOnSave.options = CodeActionsOnSaveOptions.from(config.get<ESLintOptions | null>('codeActionsOnSave.options', null));
 				}
 				if (workspaceFolder !== undefined) {
 					settings.workspaceFolder = {
@@ -807,10 +806,18 @@ export namespace ESLintClient {
 
 			return rawConfig.map(rawValue => {
 				if (typeof rawValue.severity === 'string' && typeof rawValue.rule === 'string') {
-					return {
-						severity: rawValue.severity,
-						rule: rawValue.rule,
-					};
+					if (typeof rawValue.fixable === 'boolean') {
+						return {
+							severity: rawValue.severity,
+							rule: rawValue.rule,
+							fixable: rawValue.fixable
+						};
+					} else {
+						return {
+							severity: rawValue.severity,
+							rule: rawValue.rule,
+						};
+					}
 				}
 
 				return undefined;

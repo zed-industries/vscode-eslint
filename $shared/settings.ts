@@ -64,9 +64,19 @@ export namespace CodeActionsOnSaveRules {
 	}
 }
 
+export namespace CodeActionsOnSaveOptions {
+	export function from(value: object | undefined | null): ESLintOptions | undefined {
+		if (value === undefined || value === null || typeof value !== 'object') {
+			return undefined;
+		}
+		return value;
+	}
+}
+
 export type CodeActionsOnSaveSettings = {
 	mode: CodeActionsOnSaveMode;
 	rules?: string[];
+	options?: ESLintOptions;
 };
 
 export enum ESLintSeverity {
@@ -109,6 +119,8 @@ export enum RuleSeverity {
 export type RuleCustomization = {
 	rule: string;
 	severity: RuleSeverity;
+	/** Only apply to autofixable rules */
+	fixable?: boolean;
 };
 
 export type RunValues = 'onType' | 'onSave';
@@ -156,7 +168,7 @@ export type ConfigurationSettings = {
 	packageManager: PackageManagers;
 	useESLintClass: boolean;
 	useFlatConfig?: boolean | undefined;
-	experimental: {
+	experimental?: {
 		useFlatConfig: boolean;
 	};
 	codeAction: CodeActionSettings;
